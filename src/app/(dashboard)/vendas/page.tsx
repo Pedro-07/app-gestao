@@ -376,100 +376,124 @@ export default function VendasPage() {
 
             {/* Itens */}
             <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <Label>Produtos *</Label>
-                <Button type="button" variant="outline" size="sm" onClick={addItem}>
-                  <Plus className="h-4 w-4 mr-1" />Adicionar
-                </Button>
-              </div>
+              <Label>Produtos *</Label>
 
-              {fields.length === 0 && (
-                <p className="text-sm text-muted-foreground text-center py-4 border rounded-lg border-dashed">
-                  Clique em &quot;Adicionar&quot; para inserir produtos
-                </p>
-              )}
+              {fields.length === 0 ? (
+                <button
+                  type="button"
+                  onClick={addItem}
+                  className="w-full py-8 border-2 border-dashed border-muted-foreground/25 rounded-lg flex flex-col items-center gap-2 text-muted-foreground hover:border-primary/50 hover:text-primary hover:bg-primary/5 transition-colors"
+                >
+                  <Plus className="h-8 w-8" />
+                  <span className="text-sm font-medium">Clique para adicionar um produto</span>
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  {fields.map((field, index) => (
+                    <div key={field.id} className="border rounded-lg p-3 space-y-3 bg-card">
+                      {/* Header do item */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                          Item {index + 1}
+                        </span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          onClick={() => remove(index)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5 mr-1" />Remover
+                        </Button>
+                      </div>
 
-              <div className="space-y-3">
-                {fields.map((field, index) => (
-                  <div key={field.id} className="border rounded-lg p-3 space-y-3">
-                    <div className="space-y-1">
-                      <Label className="text-xs">Produto</Label>
-                      <Controller
-                        name={`itens.${index}.produtoId`}
-                        control={control}
-                        render={({ field: f }) => (
-                          <Combobox
-                            options={produtoOptions}
-                            value={f.value ?? ''}
-                            onSelect={(v: string) => { f.onChange(v); onProdutoChange(index, v) }}
-                            placeholder="Selecione ou busque..."
-                            searchPlaceholder="Digite o nome do produto..."
-                          />
-                        )}
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-3 gap-2">
                       <div className="space-y-1">
-                        <Label className="text-xs">Tamanho</Label>
+                        <Label className="text-xs">Produto</Label>
                         <Controller
-                          name={`itens.${index}.tamanho`}
+                          name={`itens.${index}.produtoId`}
                           control={control}
                           render={({ field: f }) => (
-                            <Select value={f.value} onValueChange={f.onChange}>
-                              <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
-                              <SelectContent>
-                                {TAMANHOS.map((t) => {
-                                  const produto = produtos.find((p) => p.id === watchItens[index]?.produtoId)
-                                  const qty = produto?.estoque[t] ?? 0
-                                  return (
-                                    <SelectItem key={t} value={t} disabled={qty === 0}>
-                                      {t} {qty === 0 ? '(sem estoque)' : `(${qty})`}
-                                    </SelectItem>
-                                  )
-                                })}
-                              </SelectContent>
-                            </Select>
+                            <Combobox
+                              options={produtoOptions}
+                              value={f.value ?? ''}
+                              onSelect={(v: string) => { f.onChange(v); onProdutoChange(index, v) }}
+                              placeholder="Selecione ou busque..."
+                              searchPlaceholder="Digite o nome do produto..."
+                            />
                           )}
                         />
                       </div>
 
-                      <div className="space-y-1">
-                        <Label className="text-xs">Quantidade</Label>
-                        <Input
-                          type="number" min="1" className="h-8"
-                          {...register(`itens.${index}.quantidade`)}
-                          onChange={(e) => {
-                            register(`itens.${index}.quantidade`).onChange(e)
-                            onQtyChange(index, Number(e.target.value))
-                          }}
-                        />
-                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        <div className="space-y-1">
+                          <Label className="text-xs">Tamanho</Label>
+                          <Controller
+                            name={`itens.${index}.tamanho`}
+                            control={control}
+                            render={({ field: f }) => (
+                              <Select value={f.value} onValueChange={f.onChange}>
+                                <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
+                                <SelectContent>
+                                  {TAMANHOS.map((t) => {
+                                    const produto = produtos.find((p) => p.id === watchItens[index]?.produtoId)
+                                    const qty = produto?.estoque[t] ?? 0
+                                    return (
+                                      <SelectItem key={t} value={t} disabled={qty === 0}>
+                                        {t} {qty === 0 ? '(sem estoque)' : `(${qty})`}
+                                      </SelectItem>
+                                    )
+                                  })}
+                                </SelectContent>
+                              </Select>
+                            )}
+                          />
+                        </div>
 
-                      <div className="space-y-1">
-                        <Label className="text-xs">Subtotal</Label>
-                        <div className="h-8 flex items-center px-3 border rounded-lg bg-muted text-sm font-semibold">
-                          {formatCurrency(watchItens[index]?.subtotal ?? 0)}
+                        <div className="space-y-1">
+                          <Label className="text-xs">Quantidade</Label>
+                          <Input
+                            type="number" min="1" className="h-8"
+                            {...register(`itens.${index}.quantidade`)}
+                            onChange={(e) => {
+                              register(`itens.${index}.quantidade`).onChange(e)
+                              onQtyChange(index, Number(e.target.value))
+                            }}
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label className="text-xs">Subtotal</Label>
+                          <div className="h-8 flex items-center px-3 border rounded-lg bg-muted text-sm font-semibold">
+                            {formatCurrency(watchItens[index]?.subtotal ?? 0)}
+                          </div>
                         </div>
                       </div>
-                    </div>
 
-                    <div className="flex justify-between items-center">
                       <p className="text-xs text-muted-foreground">
                         Preço unit.: {formatCurrency(watchItens[index]?.precoUnitario ?? 0)}
                       </p>
-                      <Button type="button" variant="ghost" size="sm" className="h-7 text-destructive hover:text-destructive" onClick={() => remove(index)}>
-                        <Trash2 className="h-3.5 w-3.5 mr-1" />Remover
-                      </Button>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Botão adicionar — sempre abaixo da lista */}
+              {fields.length > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full border-dashed border-primary/40 text-primary hover:bg-primary/5 hover:border-primary"
+                  onClick={addItem}
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Adicionar outro produto
+                </Button>
+              )}
 
               {errors.itens && <p className="text-xs text-destructive">{errors.itens.message}</p>}
 
               {fields.length > 0 && (
-                <div className="flex justify-end">
+                <div className="flex justify-end border-t pt-2">
                   <p className="text-lg font-bold">Total: {formatCurrency(total)}</p>
                 </div>
               )}
