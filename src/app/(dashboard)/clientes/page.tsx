@@ -3,10 +3,11 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  collection, getDocs, addDoc, updateDoc, deleteDoc,
+  collection, addDoc, updateDoc, deleteDoc,
   doc, serverTimestamp, orderBy, query as fsQuery,
 } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
+import { fetchCacheFirst } from '@/lib/firestore-cache'
 import type { Cliente, ClienteStatus, Parcela } from '@/types'
 import { maskCPFCNPJ, maskPhone, onlyLetters, isValidCPF, isValidCNPJ, generateClientCode, formatCurrency } from '@/lib/utils'
 import { useForm, Controller } from 'react-hook-form'
@@ -48,8 +49,10 @@ const clienteSchema = z.object({
 type ClienteForm = z.infer<typeof clienteSchema>
 
 async function fetchClientes(): Promise<Cliente[]> {
-  const snap = await getDocs(fsQuery(collection(db, 'clientes'), orderBy('nome')))
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() } as Cliente))
+  return fetchCacheFirst(
+    fsQuery(collection(db, 'clientes'), orderBy('nome')),
+    (id, data) => ({ id, ...data } as Cliente),
+  )
 }
 
 const statusConfig: Record<ClienteStatus, { label: string; variant: 'default' | 'destructive' | 'secondary' }> = {
@@ -73,10 +76,10 @@ export default function ClientesPage() {
 
   const { data: parcelas = [] } = useQuery<Parcela[]>({
     queryKey: ['parcelas'],
-    queryFn: async () => {
-      const snap = await getDocs(collection(db, 'parcelas'))
-      return snap.docs.map((d) => ({ id: d.id, ...d.data() } as Parcela))
-    },
+    queryFn: () => fetchCacheFirst(
+      collection(db, 'parcelas') as Parameters<typeof fetchCacheFirst>[0],
+      (id, data) => ({ id, ...data } as Parcela),
+    ),
   })
 
   function getSaldoDevedor(clienteId: string): number {

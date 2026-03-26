@@ -87,11 +87,33 @@ async function fetchDashboardData() {
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function DashboardPage() {
   const router = useRouter()
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     queryKey: ['dashboard'],
     queryFn: fetchDashboardData,
     refetchInterval: 60_000,
   })
+
+  if (isError) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 gap-4 text-center">
+        <div className="bg-red-100 dark:bg-red-950 rounded-full p-4">
+          <AlertTriangle className="h-8 w-8 text-red-600" />
+        </div>
+        <div className="space-y-1">
+          <p className="font-semibold">Não foi possível carregar o painel</p>
+          <p className="text-sm text-muted-foreground">
+            Verifique sua conexão com a internet e tente novamente.
+          </p>
+        </div>
+        <button
+          onClick={() => window.location.reload()}
+          className="text-sm text-primary underline underline-offset-2"
+        >
+          Recarregar
+        </button>
+      </div>
+    )
+  }
 
   if (isLoading) {
     return (

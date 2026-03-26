@@ -4,6 +4,7 @@ import './globals.css'
 import { ThemeProvider } from '@/components/shared/theme-provider'
 import { AuthProvider } from '@/components/shared/auth-provider'
 import { QueryProvider } from '@/components/shared/query-provider'
+import { ErrorBoundary } from '@/components/shared/error-boundary'
 import { Toaster } from '@/components/ui/sonner'
 
 const inter = Inter({ subsets: ['latin'] })
@@ -29,7 +30,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem disableTransitionOnChange>
           <QueryProvider>
             <AuthProvider>
-              {children}
+              <ErrorBoundary>
+                {children}
+              </ErrorBoundary>
               <Toaster richColors position="top-right" />
             </AuthProvider>
           </QueryProvider>

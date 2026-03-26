@@ -3,16 +3,24 @@
 import { useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { doc, getDoc, collection, query, where, getDocs, writeBatch, serverTimestamp, updateDoc } from 'firebase/firestore'
+import {
+  doc, getDoc, collection, query, where, getDocs,
+  writeBatch, serverTimestamp, runTransaction, orderBy, query as fsQuery,
+} from 'firebase/firestore'
 import { db } from '@/lib/firebase'
-import type { Venda, Parcela, Produto } from '@/types'
+import { fetchCacheFirst } from '@/lib/firestore-cache'
+import type { Venda, Parcela, Produto, Cliente, FormaPagamento } from '@/types'
 import { formatCurrency, formatDate } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
-import { ArrowLeft, FileDown, XCircle, Loader2 } from 'lucide-react'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Combobox } from '@/components/shared/combobox'
+import { ArrowLeft, FileDown, XCircle, Loader2, Pencil } from 'lucide-react'
 import { Timestamp } from 'firebase/firestore'
 import { toast } from 'sonner'
 
@@ -51,6 +59,11 @@ export default function VendaDetalhePage() {
   const qc = useQueryClient()
   const [cancelDialog, setCancelDialog] = useState(false)
   const [canceling, setCanceling] = useState(false)
+  const [editDialog, setEditDialog] = useState(false)
+  const [editSaving, setEditSaving] = useState(false)
+  const [editClienteId, setEditClienteId] = useState('')
+  const [editFormaPagamento, setEditFormaPagamento] = useState<FormaPagamento>('dinheiro')
+  const [editQuantidades, setEditQuantidades] = useState<number[]>([])
 
   const { data, isLoading } = useQuery({
     queryKey: ['venda', id],
@@ -61,6 +74,79 @@ export default function VendaDetalhePage() {
     queryKey: ['produtos'],
     queryFn: fetchProdutos,
   })
+
+  const { data: clientes = [] } = useQuery<Cliente[]>({
+    queryKey: ['clientes'],
+    queryFn: () => fetchCacheFirst(
+      fsQuery(collection(db, 'clientes'), orderBy('nome')),
+      (id, data) => ({ id, ...data } as Cliente),
+    ),
+  })
+
+  function openEditDialog() {
+    if (!data?.venda) return
+    const { venda } = data
+    setEditClienteId(venda.clienteId)
+    setEditFormaPagamento(venda.formaPagamento)
+    setEditQuantidades(venda.itens.map((i) => i.quantidade))
+    setEditDialog(true)
+  }
+
+  async function handleEditSave() {
+    if (!data?.venda) return
+    const { venda } = data
+    setEditSaving(true)
+    try {
+      const cliente = clientes.find((c) => c.id === editClienteId)
+
+      // Build updated items with new quantities
+      const updatedItens = venda.itens.map((item, idx) => {
+        const newQty = Math.max(1, editQuantidades[idx] ?? item.quantidade)
+        return { ...item, quantidade: newQty, subtotal: newQty * item.precoUnitario }
+      })
+      const newTotal = updatedItens.reduce((s, i) => s + i.subtotal, 0)
+
+      await runTransaction(db, async (tx) => {
+        // Adjust stock deltas for quantity changes
+        for (let idx = 0; idx < venda.itens.length; idx++) {
+          const item = venda.itens[idx]
+          const oldQty = item.quantidade
+          const newQty = Math.max(1, editQuantidades[idx] ?? oldQty)
+          const delta = newQty - oldQty
+          if (delta !== 0) {
+            const prodRef = doc(db, 'produtos', item.produtoId)
+            const prodSnap = await tx.get(prodRef)
+            if (prodSnap.exists()) {
+              const estoque = { ...(prodSnap.data().estoque as Record<string, number>) }
+              estoque[item.tamanho] = (estoque[item.tamanho] ?? 0) - delta
+              if (estoque[item.tamanho] < 0) throw new Error(`Estoque insuficiente para ${item.produtoNome} (${item.tamanho})`)
+              tx.update(prodRef, { estoque, updatedAt: serverTimestamp() })
+            }
+          }
+        }
+
+        tx.update(doc(db, 'vendas', venda.id), {
+          clienteId: editClienteId,
+          clienteNome: cliente?.nome ?? venda.clienteNome,
+          clienteCidade: cliente?.cidade ?? venda.clienteCidade,
+          formaPagamento: editFormaPagamento,
+          itens: updatedItens,
+          total: newTotal,
+          updatedAt: serverTimestamp(),
+        })
+      })
+
+      qc.invalidateQueries({ queryKey: ['venda', id] })
+      qc.invalidateQueries({ queryKey: ['vendas'] })
+      qc.invalidateQueries({ queryKey: ['produtos'] })
+      toast.success('Venda atualizada!')
+      setEditDialog(false)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Erro ao salvar edição')
+    } finally {
+      setEditSaving(false)
+    }
+  }
 
   async function handleCancelarVenda() {
     if (!data?.venda) return
@@ -266,10 +352,16 @@ export default function VendaDetalhePage() {
             PDF
           </Button>
           {!isCanceled && (
-            <Button variant="outline" size="sm" className="text-destructive hover:text-destructive" onClick={() => setCancelDialog(true)}>
-              <XCircle className="mr-2 h-4 w-4" />
-              Cancelar
-            </Button>
+            <>
+              <Button variant="outline" size="sm" onClick={openEditDialog}>
+                <Pencil className="mr-2 h-4 w-4" />
+                Editar
+              </Button>
+              <Button variant="outline" size="sm" className="text-destructive hover:text-destructive" onClick={() => setCancelDialog(true)}>
+                <XCircle className="mr-2 h-4 w-4" />
+                Cancelar
+              </Button>
+            </>
           )}
         </div>
       </div>
@@ -343,6 +435,69 @@ export default function VendaDetalhePage() {
           </CardContent>
         </Card>
       )}
+
+      {/* Edit Dialog */}
+      <Dialog open={editDialog} onOpenChange={setEditDialog}>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Pencil className="h-5 w-5" />
+              Editar Venda
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <Label>Cliente</Label>
+              <Combobox
+                options={clientes.map((c) => ({ value: c.id, label: c.nome, sublabel: c.cidade }))}
+                value={editClienteId}
+                onSelect={setEditClienteId}
+                placeholder="Selecione o cliente"
+                searchPlaceholder="Buscar cliente..."
+                emptyMessage="Nenhum cliente encontrado"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label>Forma de Pagamento</Label>
+              <Select value={editFormaPagamento} onValueChange={(v) => setEditFormaPagamento(v as FormaPagamento)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="dinheiro">Dinheiro</SelectItem>
+                  <SelectItem value="pix">PIX</SelectItem>
+                  <SelectItem value="cartao">Cartão</SelectItem>
+                  <SelectItem value="promissoria">Nota Promissória</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Quantidades dos Itens</Label>
+              {data?.venda?.itens.map((item, idx) => (
+                <div key={idx} className="flex items-center gap-3 text-sm">
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium truncate">{item.produtoNome}</p>
+                    <p className="text-xs text-muted-foreground">{item.tamanho} — {formatCurrency(item.precoUnitario)}/un</p>
+                  </div>
+                  <Input
+                    type="number" min="1" className="w-20 text-center"
+                    value={editQuantidades[idx] ?? item.quantidade}
+                    onChange={(e) => {
+                      const v = Math.max(1, Number(e.target.value))
+                      setEditQuantidades((prev) => { const a = [...prev]; a[idx] = v; return a })
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setEditDialog(false)}>Cancelar</Button>
+            <Button onClick={handleEditSave} disabled={editSaving}>
+              {editSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Salvar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Cancel Dialog */}
       <Dialog open={cancelDialog} onOpenChange={setCancelDialog}>

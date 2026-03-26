@@ -63,6 +63,7 @@ export interface Produto {
   precoVenda: number
   estoque: EstoquePorTamanho
   fotoUrl?: string
+  codigoBarras?: string
   fornecedorId?: string
   fornecedorNome?: string
   createdAt: Timestamp

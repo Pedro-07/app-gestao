@@ -3,10 +3,11 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  collection, getDocs, addDoc, updateDoc, deleteDoc,
+  collection, addDoc, updateDoc, deleteDoc,
   doc, serverTimestamp, orderBy, query as fsQuery,
 } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
+import { fetchCacheFirst } from '@/lib/firestore-cache'
 import type { Fornecedor } from '@/types'
 import { maskPhone, onlyLetters } from '@/lib/utils'
 import { useForm } from 'react-hook-form'
@@ -33,8 +34,10 @@ const fornecedorSchema = z.object({
 type FornecedorForm = z.infer<typeof fornecedorSchema>
 
 async function fetchFornecedores(): Promise<Fornecedor[]> {
-  const snap = await getDocs(fsQuery(collection(db, 'fornecedores'), orderBy('nome')))
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() } as Fornecedor))
+  return fetchCacheFirst(
+    fsQuery(collection(db, 'fornecedores'), orderBy('nome')),
+    (id, data) => ({ id, ...data } as Fornecedor),
+  )
 }
 
 export default function FornecedoresPage() {
@@ -52,10 +55,10 @@ export default function FornecedoresPage() {
 
   const { data: produtos = [] } = useQuery({
     queryKey: ['produtos'],
-    queryFn: async () => {
-      const snap = await getDocs(collection(db, 'produtos'))
-      return snap.docs.map((d) => d.data())
-    },
+    queryFn: () => fetchCacheFirst(
+      collection(db, 'produtos') as Parameters<typeof fetchCacheFirst>[0],
+      (_id, data) => data,
+    ),
   })
 
   const filtered = fornecedores.filter((f) =>

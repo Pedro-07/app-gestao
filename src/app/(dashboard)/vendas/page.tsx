@@ -3,13 +3,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  collection, getDocs, serverTimestamp,
-  orderBy, query as fsQuery, Timestamp, writeBatch, doc,
+  collection, serverTimestamp,
+  orderBy, query as fsQuery, Timestamp, runTransaction, doc,
 } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
+import { fetchCacheFirst } from '@/lib/firestore-cache'
 import type { Cliente, Produto, Venda, Tamanho } from '@/types'
 import { formatCurrency, formatDate, generateInstallments } from '@/lib/utils'
-import { useForm, useFieldArray, Controller } from 'react-hook-form'
+import { useForm, useFieldArray, Controller, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { toast } from 'sonner'
@@ -53,15 +54,18 @@ const vendaSchema = z.object({
 
 type VendaForm = z.infer<typeof vendaSchema>
 
-async function fetchVendasData() {
-  const [vendasSnap, clientesSnap] = await Promise.all([
-    getDocs(fsQuery(collection(db, 'vendas'), orderBy('createdAt', 'desc'))),
-    getDocs(fsQuery(collection(db, 'clientes'), orderBy('nome'))),
-  ])
-  return {
-    vendas: vendasSnap.docs.map((d) => ({ id: d.id, ...d.data() } as Venda)),
-    clientes: clientesSnap.docs.map((d) => ({ id: d.id, ...d.data() } as Cliente)),
-  }
+async function fetchVendas(): Promise<Venda[]> {
+  return fetchCacheFirst(
+    fsQuery(collection(db, 'vendas'), orderBy('createdAt', 'desc')),
+    (id, data) => ({ id, ...data } as Venda),
+  )
+}
+
+async function fetchClientes(): Promise<Cliente[]> {
+  return fetchCacheFirst(
+    fsQuery(collection(db, 'clientes'), orderBy('nome')),
+    (id, data) => ({ id, ...data } as Cliente),
+  )
 }
 
 const statusMap: Record<string, { label: string; variant: 'default' | 'destructive' | 'secondary' | 'outline' }> = {
@@ -83,18 +87,25 @@ export default function VendasPage() {
   const [saving, setSaving] = useState(false)
   const submittingRef = useRef(false)
 
-  const { data, isLoading } = useQuery({ queryKey: ['vendas'], queryFn: fetchVendasData })
+  // Vendas: carrega imediatamente para exibir a lista
+  const { data: vendas = [], isLoading } = useQuery<Venda[]>({
+    queryKey: ['vendas'],
+    queryFn: fetchVendas,
+  })
+
+  // Clientes: usa o mesmo cache da página /clientes; só faz fetch se não estiver em cache
+  const { data: clientes = [] } = useQuery<Cliente[]>({
+    queryKey: ['clientes'],
+    queryFn: fetchClientes,
+  })
 
   const { data: produtos = [] } = useQuery<Produto[]>({
     queryKey: ['produtos'],
-    queryFn: async () => {
-      const snap = await getDocs(fsQuery(collection(db, 'produtos'), orderBy('nome')))
-      return snap.docs.map((d) => ({ id: d.id, ...d.data() } as Produto))
-    },
+    queryFn: () => fetchCacheFirst(
+      fsQuery(collection(db, 'produtos'), orderBy('nome')),
+      (id, data) => ({ id, ...data } as Produto),
+    ),
   })
-
-  const vendas = data?.vendas ?? []
-  const clientes = data?.clientes ?? []
 
   const filtered = vendas.filter((v) => {
     const matchSearch = v.clienteNome.toLowerCase().includes(search.toLowerCase())
@@ -106,7 +117,8 @@ export default function VendasPage() {
     register, handleSubmit, control, reset, watch, setValue,
     formState: { errors },
   } = useForm<VendaForm>({
-    resolver: zodResolver(vendaSchema) as any,
+    // Cast necessário: zod v4 + @hookform/resolvers v5 — z.coerce infere como `unknown` no output
+    resolver: zodResolver(vendaSchema) as unknown as Resolver<VendaForm>,
     defaultValues: { formaPagamento: 'dinheiro', itens: [], entrada: 0, numeroParcelas: 1, intervaloParcelas: '30' },
   })
 
@@ -172,83 +184,92 @@ export default function VendasPage() {
     setConfirmState(data)
   }
 
-  // Step 2: execute batch after confirmation
+  // Step 2: executa a venda com transação atômica — lê e verifica estoque no Firestore
+  // antes de gravar, evitando overselling em caso de uso simultâneo em abas/dispositivos.
   async function executeVenda(data: VendaForm) {
     if (submittingRef.current) return
     submittingRef.current = true
     setSaving(true)
     try {
-      const batch = writeBatch(db)
-
-      for (const item of data.itens) {
-        const produto = produtos.find((p) => p.id === item.produtoId)
-        if (!produto) throw new Error('Produto não encontrado')
-        const estoqueDisp = produto.estoque[item.tamanho] ?? 0
-        if (estoqueDisp < item.quantidade) {
-          throw new Error(`Estoque insuficiente: ${produto.nome} tamanho ${item.tamanho} (disponível: ${estoqueDisp})`)
-        }
-      }
-
       const isPromissoria = data.formaPagamento === 'promissoria'
       const status = isPromissoria ? 'pendente' : 'paga'
       const vendaRef = doc(collection(db, 'vendas'))
+      const produtoRefs = data.itens.map((item) => doc(db, 'produtos', item.produtoId))
 
-      batch.set(vendaRef, {
-        clienteId: data.clienteId, clienteNome: data.clienteNome, clienteCidade: data.clienteCidade,
-        itens: data.itens, total, formaPagamento: data.formaPagamento,
-        entrada: data.entrada ?? 0, numeroParcelas: data.numeroParcelas ?? 1,
-        observacoes: data.observacoes ?? '', status,
-        dataVenda: serverTimestamp(), createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+      await runTransaction(db, async (transaction) => {
+        // 1. Leituras primeiro (obrigatório em transações Firestore)
+        const produtoDocs = await Promise.all(produtoRefs.map((r) => transaction.get(r)))
+
+        // 2. Valida estoque com dados em tempo real (não do cache)
+        for (let i = 0; i < data.itens.length; i++) {
+          const item = data.itens[i]
+          const snap = produtoDocs[i]
+          if (!snap.exists()) {
+            throw new Error(`Produto "${item.produtoNome}" não encontrado no sistema`)
+          }
+          const estoqueDisp = (snap.data().estoque as Record<string, number>)[item.tamanho] ?? 0
+          if (estoqueDisp < item.quantidade) {
+            throw new Error(
+              `Estoque insuficiente: ${item.produtoNome} tam. ${item.tamanho} — disponível: ${estoqueDisp}, solicitado: ${item.quantidade}`
+            )
+          }
+        }
+
+        // 3. Grava a venda
+        transaction.set(vendaRef, {
+          clienteId: data.clienteId, clienteNome: data.clienteNome, clienteCidade: data.clienteCidade,
+          itens: data.itens, total, formaPagamento: data.formaPagamento,
+          entrada: data.entrada ?? 0, numeroParcelas: data.numeroParcelas ?? 1,
+          observacoes: data.observacoes ?? '', status,
+          dataVenda: serverTimestamp(), createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+        })
+
+        // 4. Atualiza estoque e registra movimentações
+        for (let i = 0; i < data.itens.length; i++) {
+          const item = data.itens[i]
+          const estoqueAtual = produtoDocs[i].data()!.estoque as Record<string, number>
+          const novoEstoque = { ...estoqueAtual, [item.tamanho]: estoqueAtual[item.tamanho] - item.quantidade }
+          transaction.update(produtoRefs[i], { estoque: novoEstoque, updatedAt: serverTimestamp() })
+          transaction.set(doc(collection(db, 'movimentacoes')), {
+            produtoId: item.produtoId, produtoNome: item.produtoNome,
+            tipo: 'saida', tamanho: item.tamanho, quantidade: item.quantidade,
+            motivo: 'Venda', vendaId: vendaRef.id, createdAt: serverTimestamp(),
+          })
+        }
+
+        // 5. Cria parcelas (somente promissória)
+        if (isPromissoria && data.numeroParcelas && data.primeiroVencimento) {
+          const intervalDays = parseInt(data.intervaloParcelas ?? '30', 10)
+          const firstDate = new Date(data.primeiroVencimento + 'T12:00:00')
+          const parcelasGeradas = generateInstallments(total, data.numeroParcelas, firstDate, data.entrada ?? 0, intervalDays)
+          const cliente = clientes.find((c) => c.id === data.clienteId)
+
+          for (let i = 0; i < parcelasGeradas.length; i++) {
+            const p = parcelasGeradas[i]
+            const dueDateStr = editableDates[i]
+            const dueDate = dueDateStr ? new Date(dueDateStr + 'T12:00:00') : p.dueDate
+            transaction.set(doc(collection(db, 'parcelas')), {
+              vendaId: vendaRef.id, clienteId: data.clienteId, clienteNome: data.clienteNome,
+              clienteTelefone: cliente?.telefone ?? '', numero: p.number,
+              totalParcelas: data.numeroParcelas, valor: p.value, valorPago: 0,
+              dataVencimento: Timestamp.fromDate(dueDate), status: 'pendente',
+              pagamentos: [], createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+            })
+          }
+
+          if ((data.entrada ?? 0) > 0) {
+            transaction.set(doc(collection(db, 'parcelas')), {
+              vendaId: vendaRef.id, clienteId: data.clienteId, clienteNome: data.clienteNome,
+              clienteTelefone: clientes.find((c) => c.id === data.clienteId)?.telefone ?? '',
+              numero: 0, totalParcelas: data.numeroParcelas, valor: data.entrada, valorPago: data.entrada,
+              dataVencimento: Timestamp.fromDate(new Date()), status: 'paga',
+              pagamentos: [{ id: 'entrada', valor: data.entrada, dataPagamento: Timestamp.fromDate(new Date()), formaPagamento: 'dinheiro', observacoes: 'Entrada' }],
+              createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+            })
+          }
+        }
       })
 
-      for (const item of data.itens) {
-        const produto = produtos.find((p) => p.id === item.produtoId)!
-        const novoEstoque = { ...produto.estoque }
-        novoEstoque[item.tamanho] -= item.quantidade
-        batch.update(doc(db, 'produtos', item.produtoId), { estoque: novoEstoque, updatedAt: serverTimestamp() })
-        const movRef = doc(collection(db, 'movimentacoes'))
-        batch.set(movRef, {
-          produtoId: item.produtoId, produtoNome: item.produtoNome,
-          tipo: 'saida', tamanho: item.tamanho, quantidade: item.quantidade,
-          motivo: 'Venda', vendaId: vendaRef.id, createdAt: serverTimestamp(),
-        })
-      }
-
-      if (isPromissoria && data.numeroParcelas && data.primeiroVencimento) {
-        const intervalDays = parseInt(data.intervaloParcelas ?? '30', 10)
-        const firstDate = new Date(data.primeiroVencimento + 'T12:00:00')
-        const parcelas = generateInstallments(total, data.numeroParcelas, firstDate, data.entrada ?? 0, intervalDays)
-        const cliente = clientes.find((c) => c.id === data.clienteId)
-
-        for (let i = 0; i < parcelas.length; i++) {
-          const p = parcelas[i]
-          // Use the user-edited date if available
-          const dueDateStr = editableDates[i]
-          const dueDate = dueDateStr ? new Date(dueDateStr + 'T12:00:00') : p.dueDate
-          const parcelaRef = doc(collection(db, 'parcelas'))
-          batch.set(parcelaRef, {
-            vendaId: vendaRef.id, clienteId: data.clienteId, clienteNome: data.clienteNome,
-            clienteTelefone: cliente?.telefone ?? '', numero: p.number,
-            totalParcelas: data.numeroParcelas, valor: p.value, valorPago: 0,
-            dataVencimento: Timestamp.fromDate(dueDate), status: 'pendente',
-            pagamentos: [], createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
-          })
-        }
-
-        if ((data.entrada ?? 0) > 0) {
-          const entradaRef = doc(collection(db, 'parcelas'))
-          batch.set(entradaRef, {
-            vendaId: vendaRef.id, clienteId: data.clienteId, clienteNome: data.clienteNome,
-            clienteTelefone: clientes.find((c) => c.id === data.clienteId)?.telefone ?? '',
-            numero: 0, totalParcelas: data.numeroParcelas, valor: data.entrada, valorPago: data.entrada,
-            dataVencimento: Timestamp.fromDate(new Date()), status: 'paga',
-            pagamentos: [{ id: 'entrada', valor: data.entrada, dataPagamento: Timestamp.fromDate(new Date()), formaPagamento: 'dinheiro', observacoes: 'Entrada' }],
-            createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
-          })
-        }
-      }
-
-      await batch.commit()
       qc.invalidateQueries({ queryKey: ['vendas'] })
       qc.invalidateQueries({ queryKey: ['produtos'] })
       qc.invalidateQueries({ queryKey: ['parcelas'] })
@@ -258,7 +279,7 @@ export default function VendasPage() {
       setDialogOpen(false)
       reset()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Erro ao registrar venda')
+      toast.error(error instanceof Error ? error.message : 'Erro ao registrar venda. Tente novamente.')
     } finally {
       setSaving(false)
       submittingRef.current = false
@@ -348,7 +369,7 @@ export default function VendasPage() {
             </DialogTitle>
           </DialogHeader>
 
-          <form onSubmit={handleSubmit(handleFormSubmit as any)} className="space-y-5">
+          <form onSubmit={handleSubmit(handleFormSubmit as Parameters<typeof handleSubmit>[0])} className="space-y-5">
             {/* Cliente */}
             <div className="space-y-1">
               <Label>Cliente *</Label>

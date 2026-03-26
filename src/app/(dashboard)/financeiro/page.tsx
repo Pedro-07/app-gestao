@@ -3,13 +3,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  collection, getDocs, updateDoc, doc, serverTimestamp, Timestamp, addDoc,
-  writeBatch, getDoc,
+  collection, updateDoc, doc, serverTimestamp, Timestamp,
+  writeBatch, getDoc, getDocFromCache, query as fsQuery,
 } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
+import { fetchCacheFirst } from '@/lib/firestore-cache'
 import type { Parcela, FormaPagamento, Configuracoes } from '@/types'
 import { formatCurrency, formatDate, isOverdue, isDueInDays, buildWhatsAppUrl } from '@/lib/utils'
-import { useForm, Controller } from 'react-hook-form'
+import { useForm, Controller, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { toast } from 'sonner'
@@ -34,12 +35,20 @@ const pagamentoSchema = z.object({
 type PagamentoForm = z.infer<typeof pagamentoSchema>
 
 async function fetchParcelas(): Promise<Parcela[]> {
-  const snap = await getDocs(collection(db, 'parcelas'))
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() } as Parcela))
+  return fetchCacheFirst(
+    collection(db, 'parcelas') as Parameters<typeof fetchCacheFirst>[0],
+    (id, data) => ({ id, ...data } as Parcela),
+  )
 }
 
 async function fetchConfig(): Promise<Configuracoes | null> {
-  const snap = await getDoc(doc(db, 'config', 'geral'))
+  const ref = doc(db, 'config', 'geral')
+  // Tenta cache local primeiro
+  try {
+    const cached = await getDocFromCache(ref)
+    if (cached.exists()) return cached.data() as Configuracoes
+  } catch { /* cache miss */ }
+  const snap = await getDoc(ref)
   return snap.exists() ? (snap.data() as Configuracoes) : null
 }
 
@@ -60,9 +69,6 @@ function applyTemplate(template: string, vars: Record<string, string>): string {
 
 const defaultTemplateCobranca = `Olá {nome}! 👋\n\nPassando para lembrar sobre a parcela {numero}/{total} no valor de *{valor}* com vencimento em *{vencimento}*.\n\nPor favor, entre em contato para regularizar. Obrigado!`
 
-// Chave de sessão fora do componente para ser estável
-const OVERDUE_SESSION_KEY = `overdueUpdated_${new Date().toDateString()}`
-
 export default function FinanceiroPage() {
   const qc = useQueryClient()
   const [search, setSearch] = useState('')
@@ -70,9 +76,8 @@ export default function FinanceiroPage() {
   const [pagamentoDialog, setPagamentoDialog] = useState<Parcela | null>(null)
   const [whatsappDialog, setWhatsappDialog] = useState<{ parcela: Parcela; mensagem: string } | null>(null)
   const [saving, setSaving] = useState(false)
-  const overdueUpdatedRef = useRef(
-    typeof window !== 'undefined' && !!sessionStorage.getItem(OVERDUE_SESSION_KEY)
-  )
+  // Ref para evitar múltiplas atualizações por sessão/dia
+  const overdueUpdatedRef = useRef(false)
 
   const { data: parcelas = [], isLoading } = useQuery({
     queryKey: ['parcelas'],
@@ -84,28 +89,34 @@ export default function FinanceiroPage() {
     queryFn: fetchConfig,
   })
 
-  // Auto-update overdue parcelas status (pendente → atrasada)
+  // Auto-update: marca como "atrasada" as parcelas pendentes cujo vencimento já passou.
+  // A chave inclui a data do dia — se o app ficar aberto após meia-noite, o useEffect
+  // rodará novamente pois `parcelas` mudará e a chave do dia seguinte ainda não existe.
   useEffect(() => {
     if (!parcelas.length || overdueUpdatedRef.current) return
+
     const today = new Date()
     today.setHours(0, 0, 0, 0)
+    const todayKey = `overdueUpdated_${today.toDateString()}`
+    if (typeof window !== 'undefined' && sessionStorage.getItem(todayKey)) return
 
-    const overdueIds = parcelas.filter((p) => {
-      if (p.status !== 'pendente') return false
-      return getDueDate(p) < today
-    })
+    const vencidas = parcelas.filter((p) => p.status === 'pendente' && getDueDate(p) < today)
 
-    if (!overdueIds.length) return
+    // Marca a data mesmo que não haja vencidas (evita consultas repetidas no mesmo dia)
+    if (typeof window !== 'undefined') sessionStorage.setItem(todayKey, '1')
     overdueUpdatedRef.current = true
-    sessionStorage.setItem(OVERDUE_SESSION_KEY, '1')
+
+    if (!vencidas.length) return
 
     const batch = writeBatch(db)
-    overdueIds.forEach((p) => {
+    vencidas.forEach((p) => {
       batch.update(doc(db, 'parcelas', p.id), { status: 'atrasada', updatedAt: serverTimestamp() })
     })
     batch.commit().then(() => {
       qc.invalidateQueries({ queryKey: ['parcelas'] })
       qc.invalidateQueries({ queryKey: ['dashboard'] })
+    }).catch((err) => {
+      console.error('Erro ao atualizar parcelas vencidas:', err)
     })
   }, [parcelas, qc])
 
@@ -133,7 +144,8 @@ export default function FinanceiroPage() {
     register, handleSubmit, reset, watch, control,
     formState: { errors },
   } = useForm<PagamentoForm>({
-    resolver: zodResolver(pagamentoSchema) as any,
+    // Cast necessário: zod v4 + @hookform/resolvers v5 — z.coerce infere como `unknown` no output
+    resolver: zodResolver(pagamentoSchema) as unknown as Resolver<PagamentoForm>,
     defaultValues: {
       formaPagamento: 'dinheiro',
       dataPagamento: new Date().toISOString().split('T')[0],
@@ -320,7 +332,7 @@ export default function FinanceiroPage() {
               <p>Parcela {pagamentoDialog.numero === 0 ? 'Entrada' : `${pagamentoDialog.numero}/${pagamentoDialog.totalParcelas}`} · Valor: {formatCurrency(pagamentoDialog.valor - pagamentoDialog.valorPago)}</p>
             </div>
           )}
-          <form onSubmit={handleSubmit(onRegistrarPagamento as any)} className="space-y-4">
+          <form onSubmit={handleSubmit(onRegistrarPagamento as Parameters<typeof handleSubmit>[0])} className="space-y-4">
             <div className="space-y-1">
               <Label>Valor Pago (R$) *</Label>
               <Input

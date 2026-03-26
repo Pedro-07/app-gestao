@@ -15,7 +15,10 @@ export function RouteGuard({ children }: { children: React.ReactNode }) {
     }
   }, [user, loading, router])
 
-  if (loading) {
+  // Se o Firebase ainda está verificando (loading) mas já há um usuário em cache
+  // (gravado pelo persist do Zustand), mostra o conteúdo imediatamente — sem spinner.
+  // Se o Firebase voltar sem sessão válida, o useEffect acima redireciona para o login.
+  if (loading && !user) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin text-primary" />

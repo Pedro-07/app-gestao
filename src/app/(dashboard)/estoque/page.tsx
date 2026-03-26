@@ -3,14 +3,15 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  collection, getDocs, addDoc, updateDoc, deleteDoc,
+  collection, addDoc, updateDoc, deleteDoc,
   doc, serverTimestamp, orderBy, query as fsQuery,
 } from 'firebase/firestore'
+import { fetchCacheFirst } from '@/lib/firestore-cache'
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '@/lib/firebase'
 import type { Produto, CategoriaProduto, Tamanho } from '@/types'
 import { formatCurrency, generateProductCode, CATEGORY_PREFIXES } from '@/lib/utils'
-import { useForm, Controller } from 'react-hook-form'
+import { useForm, Controller, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { toast } from 'sonner'
@@ -29,6 +30,7 @@ import {
   Loader2, AlertTriangle, PlusCircle, LayoutGrid, List,
 } from 'lucide-react'
 import Image from 'next/image'
+import { BarcodeScanner } from '@/components/shared/barcode-scanner'
 
 const TAMANHOS: Tamanho[] = ['PP', 'P', 'M', 'G', 'GG', 'XGG']
 const CATEGORIAS: CategoriaProduto[] = ['camiseta', 'calca', 'vestido', 'saia', 'blusa', 'short', 'jaqueta', 'conjunto', 'outro']
@@ -48,6 +50,7 @@ const produtoSchema = z.object({
   categoria: z.enum(['camiseta', 'calca', 'vestido', 'saia', 'blusa', 'short', 'jaqueta', 'conjunto', 'outro']),
   precoCusto: z.coerce.number().min(0),
   precoVenda: z.coerce.number().min(0.01, 'Preço de venda obrigatório'),
+  codigoBarras: z.string().optional(),
   fornecedorId: z.string().optional(),
   fornecedorNome: z.string().optional(),
   estoque: estoqueSchema,
@@ -56,8 +59,10 @@ const produtoSchema = z.object({
 type ProdutoForm = z.infer<typeof produtoSchema>
 
 async function fetchProdutos(): Promise<Produto[]> {
-  const snap = await getDocs(fsQuery(collection(db, 'produtos'), orderBy('codigo')))
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() } as Produto))
+  return fetchCacheFirst(
+    fsQuery(collection(db, 'produtos'), orderBy('codigo')),
+    (id, data) => ({ id, ...data } as Produto),
+  )
 }
 
 type ViewMode = 'cards' | 'lista'
@@ -79,13 +84,15 @@ export default function EstoquePage() {
   const filtered = produtos.filter((p) => {
     const matchSearch =
       p.nome.toLowerCase().includes(search.toLowerCase()) ||
-      p.codigo?.toLowerCase().includes(search.toLowerCase())
+      p.codigo?.toLowerCase().includes(search.toLowerCase()) ||
+      (p.codigoBarras ?? '').includes(search)
     const matchCat = catFilter === 'todas' || p.categoria === catFilter
     return matchSearch && matchCat
   })
 
-  const { register, handleSubmit, reset, control, formState: { errors } } = useForm<ProdutoForm>({
-    resolver: zodResolver(produtoSchema) as any,
+  const { register, handleSubmit, reset, control, setValue, formState: { errors } } = useForm<ProdutoForm>({
+    // Cast necessário: zod v4 + @hookform/resolvers v5 — z.coerce infere como `unknown` no output
+    resolver: zodResolver(produtoSchema) as unknown as Resolver<ProdutoForm>,
     defaultValues: { categoria: 'camiseta', precoCusto: 0, precoVenda: 0, estoque: { PP: 0, P: 0, M: 0, G: 0, GG: 0, XGG: 0 } },
   })
 
@@ -102,6 +109,7 @@ export default function EstoquePage() {
     reset({
       nome: p.nome, descricao: p.descricao ?? '', categoria: p.categoria,
       precoCusto: p.precoCusto, precoVenda: p.precoVenda,
+      codigoBarras: p.codigoBarras ?? '',
       fornecedorId: p.fornecedorId ?? '', fornecedorNome: p.fornecedorNome ?? '',
       estoque: p.estoque,
     })
@@ -387,7 +395,7 @@ export default function EstoquePage() {
                 : 'Novo Produto'}
             </DialogTitle>
           </DialogHeader>
-          <form onSubmit={handleSubmit(onSubmit as any)} className="space-y-4">
+          <form onSubmit={handleSubmit(onSubmit as Parameters<typeof handleSubmit>[0])} className="space-y-4">
             <div className="space-y-1">
               <Label>Nome *</Label>
               <Input placeholder="Camiseta Básica" {...register('nome')} />
@@ -397,6 +405,14 @@ export default function EstoquePage() {
             <div className="space-y-1">
               <Label>Descrição</Label>
               <Textarea placeholder="Descrição opcional..." rows={2} {...register('descricao')} />
+            </div>
+
+            <div className="space-y-1">
+              <Label>Código de Barras</Label>
+              <div className="flex gap-2">
+                <Input placeholder="Ex: 7891234567890" {...register('codigoBarras')} className="flex-1" />
+                <BarcodeScanner compact onDetected={(code) => setValue('codigoBarras', code)} label="Ler código" />
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
