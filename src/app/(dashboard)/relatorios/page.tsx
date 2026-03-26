@@ -14,7 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Download, TrendingUp, Users, Package, BarChart3 } from 'lucide-react'
-import * as XLSX from 'xlsx'
+// xlsx é importado dinamicamente apenas ao exportar (evita ~1MB no bundle inicial)
 
 function getDate(ts: Timestamp | Date | string): Date {
   if (ts instanceof Timestamp) return ts.toDate()
@@ -113,10 +113,10 @@ export default function RelatoriosPage() {
     return { mes: format(date, 'MMM/yy', { locale: ptBR }), entradas, vendas: vendas_ }
   })
 
-  function exportarExcel() {
+  async function exportarExcel() {
+    const XLSX = await import('xlsx')
     const wb = XLSX.utils.book_new()
 
-    // Vendas
     const vendasData = vendasPeriodo.map((v) => ({
       'Data': formatDate(getDate(v.createdAt)),
       'Cliente': v.clienteNome,
@@ -127,7 +127,6 @@ export default function RelatoriosPage() {
     }))
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(vendasData), 'Vendas')
 
-    // Ranking Clientes
     const clientesData = rankingClientes.map((c, i) => ({
       '#': i + 1,
       'Cliente': c.nome,
@@ -136,7 +135,6 @@ export default function RelatoriosPage() {
     }))
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(clientesData), 'Ranking Clientes')
 
-    // Produtos
     const produtosData = rankingProdutos.map((p, i) => ({
       '#': i + 1,
       'Produto': p.nome,
@@ -146,12 +144,8 @@ export default function RelatoriosPage() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(produtosData), 'Produtos')
 
     XLSX.writeFile(wb, `relatorio_${periodo}_${new Date().toISOString().split('T')[0]}.xlsx`)
-    toast_success()
-  }
-
-  function toast_success() {
-    // Importing toast separately to avoid closure issues
-    import('sonner').then(({ toast }) => toast.success('Arquivo Excel gerado!'))
+    const { toast } = await import('sonner')
+    toast.success('Arquivo Excel gerado!')
   }
 
   return (

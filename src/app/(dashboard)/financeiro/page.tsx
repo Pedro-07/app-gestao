@@ -60,6 +60,9 @@ function applyTemplate(template: string, vars: Record<string, string>): string {
 
 const defaultTemplateCobranca = `Olá {nome}! 👋\n\nPassando para lembrar sobre a parcela {numero}/{total} no valor de *{valor}* com vencimento em *{vencimento}*.\n\nPor favor, entre em contato para regularizar. Obrigado!`
 
+// Chave de sessão fora do componente para ser estável
+const OVERDUE_SESSION_KEY = `overdueUpdated_${new Date().toDateString()}`
+
 export default function FinanceiroPage() {
   const qc = useQueryClient()
   const [search, setSearch] = useState('')
@@ -67,7 +70,9 @@ export default function FinanceiroPage() {
   const [pagamentoDialog, setPagamentoDialog] = useState<Parcela | null>(null)
   const [whatsappDialog, setWhatsappDialog] = useState<{ parcela: Parcela; mensagem: string } | null>(null)
   const [saving, setSaving] = useState(false)
-  const overdueUpdatedRef = useRef(false)
+  const overdueUpdatedRef = useRef(
+    typeof window !== 'undefined' && !!sessionStorage.getItem(OVERDUE_SESSION_KEY)
+  )
 
   const { data: parcelas = [], isLoading } = useQuery({
     queryKey: ['parcelas'],
@@ -92,6 +97,7 @@ export default function FinanceiroPage() {
 
     if (!overdueIds.length) return
     overdueUpdatedRef.current = true
+    sessionStorage.setItem(OVERDUE_SESSION_KEY, '1')
 
     const batch = writeBatch(db)
     overdueIds.forEach((p) => {
